@@ -6,6 +6,8 @@ from Colors import Colors
 
 class DataTransformer:
 
+    VECTORIZE_CHUNK_SIZE = 65536  # pairs compared per block in vectorize_all_pairs
+
     def __init__(self):
         pass
 
@@ -13,19 +15,24 @@ class DataTransformer:
         """Vectorizes all pairs of proteins and returns a matrix of boolean vectors.
         Rows are indexed by the string representation of each pair."""
         
-        filled_df = quant_df.fillna(-np.inf)
-        quant_matrix = filled_df.to_numpy() 
-        
         col_to_idx = {col: i for i, col in enumerate(quant_df.columns)}
-        
-        idx1 = [col_to_idx[p[0]] for p in pairs]
-        idx2 = [col_to_idx[p[1]] for p in pairs]
-        
-        prot1_matrix = quant_matrix[:, idx1].T 
-        prot2_matrix = quant_matrix[:, idx2].T 
-        
-        final_matrix = (prot1_matrix > prot2_matrix).astype(np.int8)
-                
+
+        idx1 = np.fromiter((col_to_idx[p[0]] for p in pairs), dtype=np.intp, count=len(pairs))
+        idx2 = np.fromiter((col_to_idx[p[1]] for p in pairs), dtype=np.intp, count=len(pairs))
+
+        # only fill/convert the proteins the pairs use (a model's handful of rules vs. a wide quant table),
+        # stored as (proteins x samples) so each pair compares two contiguous rows
+        used = np.unique(np.concatenate([idx1, idx2]))
+        quant_matrix = np.ascontiguousarray(quant_df.iloc[:, used].fillna(-np.inf).to_numpy().T)
+        idx1 = np.searchsorted(used, idx1)
+        idx2 = np.searchsorted(used, idx2)
+
+        # compare in chunks so the float intermediates stay small instead of 2 x (pairs x samples) float64
+        final_matrix = np.empty((len(pairs), len(quant_df)), dtype=np.int8)
+        for start in range(0, len(pairs), self.VECTORIZE_CHUNK_SIZE):
+            stop = start + self.VECTORIZE_CHUNK_SIZE
+            final_matrix[start:stop] = quant_matrix[idx1[start:stop]] > quant_matrix[idx2[start:stop]]
+
         return final_matrix
 
     def filter_rules(self, feature_df, quant_df):
@@ -77,12 +84,9 @@ class DataTransformer:
     def prep_vectorized_pairs_for_scikitlearn(self, rules, bool_matrix):
         # Convert dict values (bool arrays) to int arrays
         pairs = [">".join(rule) for rule in rules]
-        bool_df = pd.DataFrame()
+        if len(pairs) == 0:
+            return pd.DataFrame()
 
-        for i, rule in enumerate(rules):
-            pair = ">".join(rule)
-            bool_df[pair] = [int(eval) for eval in bool_matrix[i, :]]
-
-        bool_df = bool_df[pairs]
+        bool_df = pd.DataFrame(np.asarray(bool_matrix).T.astype(np.int64), columns=pairs)
 
         return bool_df

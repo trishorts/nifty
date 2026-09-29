@@ -76,10 +76,13 @@ class DataStructureChecker:
 
         quant_df_values = quant_df.drop(columns=['sample_id'], errors='ignore')
 
-        quant_df.replace(r'^\s*$', np.nan, regex=True, inplace=True)
+        # regex replace is a no-op on numeric columns, so only touch the others
+        non_numeric = self.non_numeric_positions(quant_df)
+        if len(non_numeric) > 0:
+            quant_df.isetitem(non_numeric, quant_df.iloc[:, non_numeric].replace(r'^\s*$', np.nan, regex=True))
 
         nan_before = quant_df_values.isna().sum().sum()
-        coerced = quant_df_values.apply(pd.to_numeric, errors="coerce")
+        coerced = self.coerce_to_numeric(quant_df_values)
         nan_after = coerced.isna().sum().sum()
 
         if coerced.isna().all().all():
@@ -155,10 +158,24 @@ class DataStructureChecker:
         df = df.set_index('sample_id')
         return df
 
+    def non_numeric_positions(self, df):
+        ''' Returns the positions of columns whose dtype is not numeric (the only ones to_numeric can change).
+        Positions rather than labels, because duplicate column names are only rejected after this is used. '''
+        dtypes = list(df.dtypes)
+        is_numeric = {dtype: pd.api.types.is_numeric_dtype(dtype) for dtype in set(dtypes)}
+        return [i for i, dtype in enumerate(dtypes) if not is_numeric[dtype]]
+
     def coerce_to_numeric(self, df):
-        df = df.apply(pd.to_numeric, errors='coerce')
+        # pd.to_numeric returns numeric columns unchanged, so only convert the non-numeric ones;
+        # applying it column-by-column to a wide (e.g. peptide-level) table is very slow
+        df = df.copy()
+        non_numeric = self.non_numeric_positions(df)
+        if len(non_numeric) == 0:
+            return df
+        # isetitem replaces whole columns, so they take the new numeric dtype
+        df.isetitem(non_numeric, df.iloc[:, non_numeric].apply(pd.to_numeric, errors='coerce'))
         return df
-    
+
     def balance_classes(self, quant_df, meta_df):
         # find the class with the least number of samples, that becomes the number of samples per class
         label_counts = meta_df['classification_label'].value_counts()

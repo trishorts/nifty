@@ -65,7 +65,20 @@ class EvaluateRules:
         rules_filtered = [rules[i] for i in unique_indices]
 
         return bool_matrix_filtered, rules_filtered
-    
+
+    def remove_identical_rules_packed(self, bool_matrix, rules):
+        '''Same result as remove_identical_rules_structured_view (first occurrence of each distinct row, in
+        original order) for a 0/1 matrix, but packs each row to bits first so the sort compares 8x fewer bytes.'''
+        packed = np.packbits(bool_matrix.astype(bool, copy=False), axis=1)
+        data_view = np.dtype((np.void, packed.shape[1]))
+        data_structured = np.ascontiguousarray(packed).view(data_view).ravel()
+        _, unique_indices = np.unique(data_structured, return_index=True)
+        unique_indices.sort()
+        bool_matrix_filtered = bool_matrix[unique_indices, :]
+        rules_filtered = [rules[i] for i in unique_indices]
+
+        return bool_matrix_filtered, rules_filtered
+
     def get_proportion_bucket_list(self, bool_matrix) -> np.ndarray:
         """
         Takes the full (N_pairs, N_samples) matrix and returns a 1D array of buckets.
@@ -129,26 +142,37 @@ class EvaluateRules:
         return bucket_to_null_scores
 
     def summarize_bucket_stats(self, pair_to_score: dict, bucket_to_rules: dict, bucket_to_null_scores: dict) -> pd.DataFrame:
-        data = []
+        # p-values are computed one bucket at a time (vectorized over the bucket's rules);
+        # rows keep the same order as a rule-by-rule loop: buckets in dict order, rules in list order
+        gene_pairs, true_scores, buckets, p_values = [], [], [], []
         for bucket, rules in bucket_to_rules.items():
             null_distribution = bucket_to_null_scores[bucket]
+            if len(rules) == 0:
+                continue
 
             null_distribution_sorted = np.sort(null_distribution)
             null_distribution_len = len(null_distribution)
 
-            for rule in rules:
-                true_score = pair_to_score[rule]
-                index = np.searchsorted(null_distribution_sorted, true_score, side='left')
-                count = null_distribution_len - index
-                p_value = count / null_distribution_len
+            scores = np.asarray([pair_to_score[rule] for rule in rules])
+            index = np.searchsorted(null_distribution_sorted, scores, side='left')
+            count = null_distribution_len - index
 
-                data.append({
-                    "Gene_Pair": rule,
-                    "True_Score": true_score,
-                    "Bucket": bucket,
-                    "P_Value": p_value
-                })
-        summary_df = pd.DataFrame(data)
+            gene_pairs.extend(rules)
+            true_scores.append(scores)
+            buckets.append(np.full(len(rules), bucket))
+            p_values.append(count / null_distribution_len)
+
+        if len(gene_pairs) == 0:
+            return pd.DataFrame([])
+
+        gene_pair_column = np.empty(len(gene_pairs), dtype=object)  # keep the tuples as tuples
+        gene_pair_column[:] = gene_pairs
+        summary_df = pd.DataFrame({
+            "Gene_Pair": gene_pair_column,
+            "True_Score": np.concatenate(true_scores),
+            "Bucket": np.concatenate(buckets),
+            "P_Value": np.concatenate(p_values)
+        })
         return summary_df
 
     def filter_rules(self, summary_df, pair_to_index, bool_matrix, k, mutual_info, mi_cutoff, disjoint):
@@ -259,7 +283,7 @@ class EvaluateRules:
         bool_matrix = data_transformer.vectorize_all_pairs(pairs, quant_df)
 
         print(" - FILTERING OUT IDENTICAL RULES", file=sys.stderr, flush=True)
-        bool_matrix, pairs = self.remove_identical_rules_structured_view(bool_matrix, pairs)
+        bool_matrix, pairs = self.remove_identical_rules_packed(bool_matrix, pairs)
         print(f"{Colors.INFO}INFO: {bool_matrix.shape[0]} rules remaining after filtering out identical rules.{Colors.END}", file=sys.stderr, flush=True)
 
         print(" - SCORING RULES", file=sys.stderr, flush=True)

@@ -48,7 +48,10 @@ class ParameterChecker:
     def read_tsv(self, tsv_file_path):
         try:
             print(f"    - READING IN {tsv_file_path}", file=sys.stderr, flush=True)
-            df = pd.read_csv(tsv_file_path, sep='\t')
+            # low_memory=False infers each column's type in one pass instead of per row-chunk, which is
+            # ~10x faster on wide (e.g. peptide-level) tables. copy() then consolidates the one-block-per-column
+            # frame read_csv returns, so later whole-table operations don't loop over every column.
+            df = pd.read_csv(tsv_file_path, sep='\t', low_memory=False).copy()
             return df
         except pd.errors.ParserError as e:
             print(f"{Colors.ERROR}ERROR parsing TSV '{tsv_file_path}': {e}{Colors.END}", file=sys.stderr, flush=True)
